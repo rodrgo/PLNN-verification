@@ -4,16 +4,24 @@ import torch
 from plnn.modules import View
 from torch import nn
 from torch.autograd import Variable
+import os
 
+from timeit import default_timer as timer
+import json
 
 class LinearizedNetwork:
 
-    def __init__(self, layers):
+    def __init__(self, layers, lp_snapshot_params=None):
         '''
         layers: A list of Pytorch layers containing only Linear/ReLU/MaxPools
+        lp_snapshot_params: Dictionary containing the path where to save the
+            snapshots as well as an identifier.
+            (relevant for the learning to linear program scenario) 
         '''
         self.layers = layers
         self.net = nn.Sequential(*layers)
+        self.lp_snapshot_params = lp_snapshot_params
+        self.snapshot_count = 0
 
     def get_upper_bound(self, domain):
         '''
@@ -80,10 +88,55 @@ class LinearizedNetwork:
 
         # We will now compute the requested lower bound
         self.model.update()
-        self.model.optimize()
+        self._model_optimize()
         assert self.model.status == 2, "LP wasn't optimally solved"
 
         return self.gurobi_vars[-1][0].X
+
+    def _model_optimize(self):
+        # Save LP and MPS models
+        # Wraps optimization of model
+        # to time how long it takes and save
+        # output.
+        start = timer()
+        self.model.optimize()
+        end = timer()
+        total_time = end - start
+        if not self.lp_snapshot_params is None:
+            fpath   = self.lp_snapshot_params['fpath']
+            tag     = self.lp_snapshot_params['tag']
+            source  = self.lp_snapshot_params['source']
+            save_dir = os.path.join(fpath, tag)
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            bname = 'snapshot_%d' % (self.snapshot_count)
+            fpath_mps = os.path.join(save_dir, '%s.mps' % (bname))
+            fpath_lp  = os.path.join(save_dir, '%s.lp' % (bname))
+            fpath_info  = os.path.join(save_dir, '%s.info' % (bname))
+            # write models
+            self.model.write(fpath_mps)
+            self.model.write(fpath_lp)
+            # Gather info about LP
+            sc = self.model.status
+            cs = self.model.getConstrs()
+            cs_sense = {c.ConstrName:c.Sense for c in cs}
+            d = {'sc': sc,
+                'constrs_sense': cs_sense,
+                'time': total_time,
+                'source': source,
+                'slacks': None,
+                'x': None,
+                'obj_val': None}
+            if sc == 2:
+                d['slacks'] = {c.ConstrName:c.Slack for c in cs}
+
+                d['x'] = {v.varName:v.x for v in self.model.getVars()}
+                d['obj_val'] = self.model.objVal
+            with open(fpath_info, 'w') as outfile:
+                json.dump(d, outfile)
+            # Increase count
+            self.snapshot_count += 1
+        return
 
     def define_linear_approximation(self, input_domain):
         '''
@@ -117,6 +170,7 @@ class LinearizedNetwork:
         self.upper_bounds.append(inp_ub)
         self.gurobi_vars.append(inp_gurobi_vars)
 
+
         ## Do the other layers, computing for each of the neuron, its upper
         ## bound and lower bound
         layer_idx = 1
@@ -145,7 +199,7 @@ class LinearizedNetwork:
                     self.model.update()
 
                     self.model.setObjective(v, grb.GRB.MINIMIZE)
-                    self.model.optimize()
+                    self._model_optimize()
                     assert self.model.status == 2, "LP wasn't optimally solved"
                     # We have computed a lower bound
                     lb = v.X
@@ -155,7 +209,7 @@ class LinearizedNetwork:
                     self.model.setObjective(v, grb.GRB.MAXIMIZE)
                     self.model.update()
                     self.model.reset()
-                    self.model.optimize()
+                    self._model_optimize()
                     assert self.model.status == 2, "LP wasn't optimally solved"
                     ub = v.X
                     v.ub = ub

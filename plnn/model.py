@@ -545,6 +545,26 @@ def load_and_simplify(rlv_file, net_cls):
 
     return network, domain
 
+def load_snapshot_and_simplify(rlv_file, net_cls, save_params=None):
+    '''
+    Take as argument a .rlv file `rlv_file`,
+    loads the corresponding network and its property,
+    simplify it and instantiate it as an object with the `net_cls` class
+
+    save_params = location of LP snapshots (for learning to linear program)
+
+    Returns the `net_cls` object and the domain of the proof
+    '''
+    net_layers, domain, prop_layers = load_rlv(rlv_file)
+    all_layers = net_layers + prop_layers
+    all_layers = simplify_network(all_layers)
+
+    # Assume net_cls is LinearizedNetwork
+    network = net_cls(all_layers, save_params)
+    network.define_linear_approximation(domain)
+
+    return network, domain
+
 
 def reluify_maxpool(layers, domain):
     '''
